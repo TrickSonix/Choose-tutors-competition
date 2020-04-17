@@ -33,7 +33,7 @@ class LogisticRegression():
         elif self.penalty == 'l1':
             for i in range(1, self.max_iter+1):
                 y_pred = self.sigmoid(np.dot(X, W))
-                new_W -= 1/i*(1/n*np.dot(X.T, y_pred-y) + 1/self.C*np.sign(W))
+                new_W = W - 1/i*(1/n*np.dot(X.T, y_pred-y) + 1/self.C*np.sign(W))
                 norm = np.linalg.norm(W-new_W, ord=2)
                 if norm < self.alpha:
                     self.iterations = i
@@ -45,7 +45,7 @@ class LogisticRegression():
         else:
             for i in range(1, self.max_iter+1):
                 y_pred = self.sigmoid(np.dot(X, W))
-                new_W -= 1/i*(1/n*np.dot(X.T, y_pred-y))
+                new_W = W - 1/i*(1/n*np.dot(X.T, y_pred-y))
                 norm = np.linalg.norm(W-new_W, ord=2)
                 if norm < self.alpha:
                     self.iterations = i
@@ -57,7 +57,7 @@ class LogisticRegression():
 
     def predict(self, X):
         if isinstance(self.coef_, np.ndarray):
-            return np.round(self.sigmoid(np.dot(X, self.coef_)))
+            return self.sigmoid(np.dot(X, self.coef_))
         else:
             print('Fit model first!')
 
@@ -200,8 +200,10 @@ class GridSearch():
         for element in param_grid_list:
             if self.estimator == 'LogisticRegression':
                 model = LogisticRegression(**element)
+            elif self.estimator == 'RandomForestClassifier':
+                model = RandomForestClassifier(**element)
             model.fit(self.X_train, self.y_train)
-            y_pred = model.predict(self.X_test)
+            y_pred = np.round(model.predict(self.X_test))
             curr_accuracy = self.accuracy_metric(self.y_test, y_pred)
             if curr_accuracy > best_accuracy:
                 best_accuracy = curr_accuracy
@@ -224,20 +226,24 @@ class Leaf():
 
     def predict(self):
         classes = {}
+        sum_classes = 0
         for label in self.labels:
             if label not in classes:
                 classes[label] = 0
             classes[label] += 1
-        
-        prediction = max(classes, key=classes.get)
+            sum_classes += 1
+        prediction = classes[max(set(self.labels))]/sum_classes
         return prediction
 
 class RandomForestClassifier():
 
-    def __init__(self, n_estimators=100, max_depth=None, random_state=None):
+    def __init__(self, n_estimators=100, max_depth=None, max_features=None, min_samples_leaf=1, random_state=None):
         self.n_estimators = n_estimators
         self.max_depth = max_depth
+        self.max_features = max_features
+        self.min_samples_leaf = min_samples_leaf
         self.random_state = random_state
+        self.forest = None
 
     def get_bootstrap(self, data, labels):
         np.random.seed(self.random_state)
@@ -245,7 +251,7 @@ class RandomForestClassifier():
         n_samples = data.shape[0]
         bootstrap = []
 
-        for n in range(self.n_estimators):
+        for _ in range(self.n_estimators):
             b_data = np.zeros(data.shape)
             b_labels = np.zeros(labels.shape)
 
@@ -259,11 +265,14 @@ class RandomForestClassifier():
         return bootstrap
 
     def get_subsample(self, len_sample):
+        np.random.seed(self.random_state)
         sample_indexes = [i for i in range(len_sample)]
-        rng = np.random.default_rng()
 
-        rng.shuffle(sample_indexes)
-        len_subsample = int(np.sqrt(len_sample))
+        np.random.shuffle(sample_indexes)
+        if not self.max_features:
+            len_subsample = int(np.sqrt(len_sample))
+        else:
+            len_subsample = self.max_features
         subsample_indexes = []
         for _ in range(len_subsample):
             subsample_indexes.append(sample_indexes.pop())
@@ -316,7 +325,7 @@ class RandomForestClassifier():
 
             for t in t_values:
                 true_data, false_data, true_labels, false_labels = self.split(data, labels, index, t)
-                if len(true_data) < 1 or len(false_data) < 1:
+                if len(true_data) < self.min_samples_leaf or len(false_data) < self.min_samples_leaf:
                     continue
                 current_quality = self.quality(true_labels, false_labels, current_gini)
 
@@ -324,3 +333,63 @@ class RandomForestClassifier():
                     best_quality, best_t, best_index = current_quality, t, index
 
         return best_quality, best_t, best_index
+    
+    def build_tree(self, data, labels, current_depth=1):
+
+        if self.max_depth:
+            if current_depth >= self.max_depth:
+                return Leaf(data, labels)
+
+        quality, t, index = self.find_best_split(data, labels)
+
+        if quality == 0:
+            return Leaf(data, labels)     
+
+        true_data, false_data, true_labels, false_labels = self.split(data, labels, index, t)
+
+        true_branch = self.build_tree(true_data, true_labels, current_depth+1)
+        false_branch = self.build_tree(false_data, false_labels, current_depth+1)
+
+        return Node(index, t, true_branch, false_branch)
+        
+    def fit(self, X, y):
+        self.forest = []
+        bootstrap = self.get_bootstrap(X, y)
+
+        for b_data, b_labels in bootstrap:
+            self.forest.append(self.build_tree(b_data, b_labels))
+
+    def classify_obj(self, obj, node):
+
+        if isinstance(node, Leaf):
+            return node.prediction
+
+        if obj[node.index] <= node.t:
+            return self.classify_obj(obj, node.true_branch)
+        else:
+            return self.classify_obj(obj, node.false_branch)
+
+    def predict(self, X):
+
+        if not isinstance(self.forest, list):
+            print("Fit model first")
+            return None
+
+        predictions = []
+
+        for tree in self.forest:
+            classes = []
+            for row in X:
+                classes.append(self.classify_obj(row, tree))
+            predictions.append(classes)
+
+        voted_predictions = []
+        for obj in zip(*predictions):
+            voted_predictions.append(np.mean(obj))
+        
+        return voted_predictions
+
+
+
+
+        
